@@ -2,6 +2,7 @@
 mod global;
 mod processor;
 mod capture;
+mod dsp;
 
 use napi_derive::napi;
 use napi::threadsafe_function::{ThreadsafeFunction};
@@ -27,18 +28,12 @@ use crate::global::{
     ECHO_SUPPRESS_THRESHOLD, ECHO_SUPPRESS_MAX_REDUCTION, FLUSH_INTERVAL_SECS, OUTPUT_BITS_PER_SAMPLE, DITHER_LEVEL,
     RecordingConfig, MixMode, get_recording_config, update_recording_config
 };
+use crate::dsp::DspProcessor;
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use crossbeam_channel::bounded;
 use hound::WavSpec;
 use std::collections::VecDeque;
-use nnnoiseless::DenoiseState;
-#[cfg(feature = "webrtc_apm")]
-use webrtc_audio_processing::{
-    Config as WebRtcConfig, EchoCancellation, EchoCancellationSuppressionLevel, GainControl, GainControlMode,
-    InitializationConfig, NoiseSuppression, NoiseSuppressionLevel, Processor as WebRtcProcessor, SampleRate,
-    NUM_SAMPLES_PER_FRAME,
-};
 
 // 【新增】定义清理回调函数
 // 这个函数会在 Node.js 环境销毁（Electron 退出）时自动执行
@@ -284,156 +279,4 @@ fn float_to_i16(sample: f32, state: &mut u32) -> i16 {
     let noise = ((*state >> 9) as f32 / (1u32 << 23) as f32) * 2.0 - 1.0;
     let dithered = (sample + noise * DITHER_LEVEL).clamp(-1.0, 1.0);
     (dithered * 32767.0).round() as i16
-}
-
-struct DspProcessor {
-    #[cfg(feature = "webrtc_apm")]
-    webrtc: Option<WebRtcProcessor>,
-    rnnoise: Option<Box<DenoiseState>>,
-    frame_size: usize,
-    // 标记当前是否启用 WebRTC AEC，决定是否走简易回声抑制兜底
-    webrtc_aec_active: bool,
-    // WebRTC 处理所需的固定帧缓冲
-    webrtc_render_buffer: Vec<f32>,
-    webrtc_capture_buffer: Vec<f32>,
-    #[cfg(feature = "webrtc_apm")]
-    webrtc_config: WebRtcConfig,
-}
-
-impl DspProcessor {
-    fn new(config: RecordingConfig) -> AppResult<Self> {
-        #[cfg(feature = "webrtc_apm")]
-        let frame_size = {
-            // 同时满足 WebRTC 与 RNNoise 的最小帧长
-            DenoiseState::FRAME_SIZE.max(NUM_SAMPLES_PER_FRAME as usize)
-        };
-        #[cfg(not(feature = "webrtc_apm"))]
-        let frame_size = DenoiseState::FRAME_SIZE;
-        let mut processor = Self {
-            #[cfg(feature = "webrtc_apm")]
-            webrtc: None,
-            rnnoise: None,
-            frame_size,
-            webrtc_aec_active: false,
-            webrtc_render_buffer: vec![0.0; frame_size],
-            webrtc_capture_buffer: vec![0.0; frame_size],
-            #[cfg(feature = "webrtc_apm")]
-            webrtc_config: WebRtcConfig::default(),
-        };
-        processor.reconfigure(config)?;
-        Ok(processor)
-    }
-
-    fn frame_size(&self) -> usize {
-        self.frame_size
-    }
-
-    fn webrtc_aec_active(&self) -> bool {
-        self.webrtc_aec_active
-    }
-
-    fn reconfigure(&mut self, config: RecordingConfig) -> AppResult<()> {
-        #[cfg(feature = "webrtc_apm")]
-        {
-            if config.enable_webrtc_aec || config.enable_webrtc_ns || config.enable_webrtc_agc {
-                // 启用 WebRTC APM 时固定为 48kHz/单声道处理
-                // 默认配置建议：
-                // AEC=High：适合大多数桌面回放场景；过度抑制可改为 Moderate
-                // NS=High：噪声更低但易有“水声”，可改为 Moderate/Low
-                // AGC=AdaptiveDigital：目标电平 3dBFS、压缩增益 9dB；过响可降低增益或提高目标电平
-                let init = InitializationConfig {
-                    sample_rate: SampleRate::Hz48000,
-                    num_capture_channels: 1,
-                    num_render_channels: 1,
-                };
-                let mut processor = WebRtcProcessor::new(&init)?;
-                let mut webrtc_config = WebRtcConfig::default();
-                webrtc_config.echo_cancellation = EchoCancellation {
-                    enabled: config.enable_webrtc_aec,
-                    suppression_level: EchoCancellationSuppressionLevel::High,
-                };
-                webrtc_config.noise_suppression = NoiseSuppression {
-                    enabled: config.enable_webrtc_ns,
-                    level: NoiseSuppressionLevel::High,
-                };
-                webrtc_config.gain_control = GainControl {
-                    enabled: config.enable_webrtc_agc,
-                    mode: GainControlMode::AdaptiveDigital,
-                    target_level_dbfs: 3,
-                    compression_gain_db: 9,
-                    enable_limiter: true,
-                };
-                processor.set_config(&webrtc_config)?;
-                self.webrtc = Some(processor);
-                self.webrtc_config = webrtc_config;
-                self.frame_size = NUM_SAMPLES_PER_FRAME as usize;
-            } else {
-                self.webrtc = None;
-            }
-        }
-
-        #[cfg(feature = "webrtc_apm")]
-        {
-            self.webrtc_aec_active = self.webrtc.is_some() && config.enable_webrtc_aec;
-        }
-        #[cfg(not(feature = "webrtc_apm"))]
-        {
-            self.webrtc_aec_active = false;
-        }
-
-        self.rnnoise = if config.enable_rnnoise {
-            Some(DenoiseState::new())
-        } else {
-            None
-        };
-
-        // 确保处理帧长与缓冲区长度一致
-        if self.frame_size < DenoiseState::FRAME_SIZE {
-            self.frame_size = DenoiseState::FRAME_SIZE;
-        }
-        if self.webrtc_render_buffer.len() != self.frame_size {
-            self.webrtc_render_buffer.resize(self.frame_size, 0.0);
-        }
-        if self.webrtc_capture_buffer.len() != self.frame_size {
-            self.webrtc_capture_buffer.resize(self.frame_size, 0.0);
-        }
-        Ok(())
-    }
-
-    fn process_mic_frame(&mut self, mic_mono: &mut [f32], spk_mono: &[f32], config: &RecordingConfig) -> AppResult<()> {
-        #[cfg(not(feature = "webrtc_apm"))]
-        let _ = spk_mono;
-        #[cfg(feature = "webrtc_apm")]
-        if let Some(processor) = &mut self.webrtc {
-            // WebRTC 处理需要与渲染端对齐的固定帧长
-            if mic_mono.len() == self.frame_size && spk_mono.len() == self.frame_size {
-                self.webrtc_render_buffer.copy_from_slice(spk_mono);
-                self.webrtc_capture_buffer.copy_from_slice(mic_mono);
-                processor.process_render_frame(&mut self.webrtc_render_buffer)?;
-                processor.process_capture_frame(&mut self.webrtc_capture_buffer)?;
-                mic_mono.copy_from_slice(&self.webrtc_capture_buffer);
-            }
-        }
-
-        if config.enable_rnnoise {
-            if let Some(denoise) = &mut self.rnnoise {
-                // RNNoise 仅支持固定帧长，长度不匹配时跳过以避免失真
-                if mic_mono.len() != DenoiseState::FRAME_SIZE {
-                    return Ok(());
-                }
-                let mut output = vec![0.0f32; DenoiseState::FRAME_SIZE];
-                let mut input = vec![0.0f32; DenoiseState::FRAME_SIZE];
-                let scale = i16::MAX as f32;
-                for i in 0..DenoiseState::FRAME_SIZE {
-                    let sample = mic_mono[i].clamp(-1.0, 1.0) * scale;
-                    input[i] = sample;
-                }
-                denoise.process_frame(&mut output, &input);
-                for i in 0..DenoiseState::FRAME_SIZE {
-                    mic_mono[i] = (output[i] / scale).clamp(-1.0, 1.0);
-                }
-            }
-        }
-        Ok(())
-    }
 }
