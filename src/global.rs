@@ -25,6 +25,26 @@ pub const TARGET_SAMPLE_RATE: usize = 48000;
 pub const TARGET_CHANNELS: usize = 2;
 // Rubato 每次处理的帧数
 pub const RESAMPLER_CHUNK_SIZE: usize = 1024;
+// 设备采集流的目标缓冲帧数，用于平衡实时性与稳定性
+pub const STREAM_BUFFER_FRAMES: u32 = 1024;
+// 录制队列允许的最大积压秒数，避免长时间录制时内存持续增长
+pub const CHANNEL_QUEUE_MAX_SECONDS: usize = 2;
+// 线程间音频包队列长度上限，防止回调阻塞
+pub const PACKET_QUEUE_MAX: usize = 128;
+// 录制输出采用双通道分离：左声道=麦克风，右声道=扬声器
+pub const MIX_SPLIT_CHANNELS: bool = true;
+// 混音模式下的增益系数
+pub const MIC_MIX_GAIN: f32 = 1.0;
+pub const SPK_MIX_GAIN: f32 = 1.0;
+// 简易回声抑制的触发阈值与最大衰减比例
+pub const ECHO_SUPPRESS_THRESHOLD: f32 = 0.15;
+pub const ECHO_SUPPRESS_MAX_REDUCTION: f32 = 0.6;
+// 长时间录制时的周期性 flush 间隔
+pub const FLUSH_INTERVAL_SECS: u64 = 5;
+// 输出 WAV 位深（16-bit PCM）以降低磁盘占用
+pub const OUTPUT_BITS_PER_SAMPLE: u16 = 16;
+// 16-bit PCM 的抖动幅度，减少量化失真
+pub const DITHER_LEVEL: f32 = 1.0 / 32768.0;
 // 是否正在录制
 pub static IS_RECORDING: AtomicBool = AtomicBool::new(false);
 // 在线程间传递的音频数据包

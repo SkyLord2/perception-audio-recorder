@@ -23,11 +23,13 @@ use windows::{
 
 use crate::global::{
     AppResult, GLOBAL_LOG, GLOBAL_REPORT, IS_RECORDING, MONITOR_THREAD_ID, SOME_EVENT, SomeInfo, TARGET_CHANNELS, 
-    TARGET_SAMPLE_RATE, get_current_format_time, report_func
+    TARGET_SAMPLE_RATE, get_current_format_time, report_func, CHANNEL_QUEUE_MAX_SECONDS, PACKET_QUEUE_MAX, 
+    MIX_SPLIT_CHANNELS, MIC_MIX_GAIN, SPK_MIX_GAIN, ECHO_SUPPRESS_THRESHOLD, ECHO_SUPPRESS_MAX_REDUCTION, 
+    FLUSH_INTERVAL_SECS, OUTPUT_BITS_PER_SAMPLE, DITHER_LEVEL
 };
 
 use cpal::traits::{DeviceTrait, HostTrait};
-use crossbeam_channel::unbounded;
+use crossbeam_channel::bounded;
 use hound::WavSpec;
 use std::collections::VecDeque;
 
@@ -118,7 +120,8 @@ fn start_record_impl() -> AppResult<()> {
     report_info_log!("麦克风设备: {}", mic_desc);
     report_info_log!("扬声器设备: {}", spk_desc);
 
-    let (tx, rx) = unbounded();
+    // 使用有界队列避免录制回调阻塞导致积压
+    let (tx, rx) = bounded(PACKET_QUEUE_MAX);
 
     let _mic_stream = capture::start_stream(&mic_device, tx.clone(), true)?;
     let _spk_stream = capture::start_stream(&spk_device, tx.clone(), false)?;
@@ -128,15 +131,18 @@ fn start_record_impl() -> AppResult<()> {
     let spec = WavSpec {
         channels: TARGET_CHANNELS as u16,
         sample_rate: TARGET_SAMPLE_RATE as u32,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
+        bits_per_sample: OUTPUT_BITS_PER_SAMPLE,
+        sample_format: hound::SampleFormat::Int,
     };
 
     let filename = format!("output_{}.wav", get_current_format_time("%Y-%m-%d_%H-%M-%S_%3f"));
     let mut writer = hound::WavWriter::create(filename, spec)?;
 
-    let mut mic_queue: VecDeque<f32> = VecDeque::with_capacity(TARGET_SAMPLE_RATE * 2);
-    let mut spk_queue: VecDeque<f32> = VecDeque::with_capacity(TARGET_SAMPLE_RATE * 2);
+    let max_queue_samples = TARGET_SAMPLE_RATE * TARGET_CHANNELS * CHANNEL_QUEUE_MAX_SECONDS;
+    let mut mic_queue: VecDeque<f32> = VecDeque::with_capacity(max_queue_samples);
+    let mut spk_queue: VecDeque<f32> = VecDeque::with_capacity(max_queue_samples);
+    let mut last_flush = Instant::now();
+    let mut dither_state: u32 = 0x1234_5678;
 
     // 【关键修改】循环条件改为检测 AtomicBool
     while IS_RECORDING.load(Ordering::SeqCst) {
@@ -145,24 +151,55 @@ fn start_record_impl() -> AppResult<()> {
         if let Ok(packet) = rx.recv_timeout(Duration::from_millis(100)) {
             if packet.is_mic {
                 mic_queue.extend(packet.data);
+                // 队列过长时丢弃旧数据，保证实时性和稳定性
+                while mic_queue.len() > max_queue_samples {
+                    mic_queue.pop_front();
+                }
             } else {
                 spk_queue.extend(packet.data);
+                // 队列过长时丢弃旧数据，保证实时性和稳定性
+                while spk_queue.len() > max_queue_samples {
+                    spk_queue.pop_front();
+                }
             }
 
             let available_frames = std::cmp::min(mic_queue.len(), spk_queue.len()) / TARGET_CHANNELS;
 
             for _ in 0..available_frames {
-                let mic_l = mic_queue.pop_front().unwrap_or(0.0);
+                let mut mic_l = mic_queue.pop_front().unwrap_or(0.0);
                 let spk_l = spk_queue.pop_front().unwrap_or(0.0);
                 
-                let mic_r = mic_queue.pop_front().unwrap_or(0.0);
+                let mut mic_r = mic_queue.pop_front().unwrap_or(0.0);
                 let spk_r = spk_queue.pop_front().unwrap_or(0.0);
 
-                let out_l = (mic_l * 1.5) + (spk_l * 0.8);
-                let out_r = (mic_r * 1.5) + (spk_r * 0.8);
+                // 简易回声抑制：扬声器越响，麦克风衰减越多
+                let spk_abs = spk_l.abs().max(spk_r.abs());
+                if spk_abs > ECHO_SUPPRESS_THRESHOLD {
+                    let over = ((spk_abs - ECHO_SUPPRESS_THRESHOLD) / (1.0 - ECHO_SUPPRESS_THRESHOLD)).clamp(0.0, 1.0);
+                    let duck = 1.0 - over * ECHO_SUPPRESS_MAX_REDUCTION;
+                    mic_l *= duck;
+                    mic_r *= duck;
+                }
 
-                writer.write_sample(out_l.clamp(-1.0, 1.0))?;
-                writer.write_sample(out_r.clamp(-1.0, 1.0))?;
+                let (out_l, out_r) = if MIX_SPLIT_CHANNELS {
+                    // 双通道分离：左=麦克风，右=扬声器（均转为单声道）
+                    let mic_mono = (mic_l + mic_r) * 0.5 * MIC_MIX_GAIN;
+                    let spk_mono = (spk_l + spk_r) * 0.5 * SPK_MIX_GAIN;
+                    (mic_mono, spk_mono)
+                } else {
+                    let out_l = mic_l * MIC_MIX_GAIN + spk_l * SPK_MIX_GAIN;
+                    let out_r = mic_r * MIC_MIX_GAIN + spk_r * SPK_MIX_GAIN;
+                    (out_l, out_r)
+                };
+
+                let sample_l = float_to_i16(out_l, &mut dither_state);
+                let sample_r = float_to_i16(out_r, &mut dither_state);
+                writer.write_sample(sample_l)?;
+                writer.write_sample(sample_r)?;
+            }
+            if last_flush.elapsed() >= Duration::from_secs(FLUSH_INTERVAL_SECS) {
+                writer.flush()?;
+                last_flush = Instant::now();
             }
         }
     }
@@ -180,4 +217,12 @@ pub fn stop_record() -> napi::Result<()> {
     }
     IS_RECORDING.store(false, Ordering::SeqCst);
     Ok(())
+}
+
+fn float_to_i16(sample: f32, state: &mut u32) -> i16 {
+    // 轻量抖动：减少量化失真并避免长时间录制的低电平噪声调制
+    *state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+    let noise = ((*state >> 9) as f32 / (1u32 << 23) as f32) * 2.0 - 1.0;
+    let dithered = (sample + noise * DITHER_LEVEL).clamp(-1.0, 1.0);
+    (dithered * 32767.0).round() as i16
 }

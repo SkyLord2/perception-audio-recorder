@@ -1,9 +1,10 @@
 // src/capture.rs
 use cpal::traits::{DeviceTrait, StreamTrait};
+use cpal::{BufferSize, SupportedBufferSize};
 use crossbeam_channel::Sender;
 use std::sync::{Arc, Mutex};
 
-use crate::global::{AudioPacket, AppResult}; // 引入自定义 Result
+use crate::global::{AudioPacket, AppResult, STREAM_BUFFER_FRAMES}; // 引入自定义 Result
 use crate::processor::AudioProcessor;
 
 pub fn start_stream(
@@ -23,9 +24,11 @@ pub fn start_stream(
     println!("配置设备 [{}]: {}Hz, {}ch", if is_mic {"Mic"} else {"Spk"}, sample_rate, channels);
 
     // AudioProcessor::new 现在返回 AppResult，? 可以直接工作
-    let processor = Arc::new(Mutex::new(AudioProcessor::new(sample_rate, channels)?));
+    let processor = Arc::new(Mutex::new(AudioProcessor::new(sample_rate, channels, is_mic)?));
 
-    let stream_config: cpal::StreamConfig = config.clone().into();
+    let mut stream_config: cpal::StreamConfig = config.clone().into();
+    // 将缓冲大小限制在设备支持范围内，避免回调抖动导致的丢帧
+    stream_config.buffer_size = choose_buffer_size(&config);
     let err_fn = move |err| eprintln!("Stream error: {}", err);
 
     let stream = match config.sample_format() {
@@ -59,7 +62,8 @@ where
         let processed_data = proc.process(&float_samples);
 
         if !processed_data.is_empty() {
-            tx.send(AudioPacket {
+            // 队列满时直接丢弃当前包，避免长时间录制时回调阻塞
+            tx.try_send(AudioPacket {
                 is_mic,
                 data: processed_data,
             }).ok();
@@ -68,4 +72,15 @@ where
 
     let stream = device.build_input_stream(config, callback, err_fn, None)?;
     Ok(stream)
+}
+
+fn choose_buffer_size(config: &cpal::SupportedStreamConfig) -> BufferSize {
+    match config.buffer_size() {
+        SupportedBufferSize::Range { min, max } => {
+            let target = STREAM_BUFFER_FRAMES;
+            let fixed = target.clamp(*min, *max);
+            BufferSize::Fixed(fixed)
+        }
+        SupportedBufferSize::Unknown => BufferSize::Default,
+    }
 }
