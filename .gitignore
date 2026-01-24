@@ -132,3 +132,4 @@ Cargo.lock
 
 # 录制输出的WAV文件
 *.wav
+*.mp3
