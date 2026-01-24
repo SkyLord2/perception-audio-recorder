@@ -31,11 +31,6 @@ pub const STREAM_BUFFER_FRAMES: u32 = 1024;
 pub const CHANNEL_QUEUE_MAX_SECONDS: usize = 2;
 // 线程间音频包队列长度上限，防止回调阻塞
 pub const PACKET_QUEUE_MAX: usize = 128;
-// 录制输出采用双通道分离：左声道=麦克风，右声道=扬声器
-pub const MIX_SPLIT_CHANNELS: bool = true;
-// 混音模式下的增益系数
-pub const MIC_MIX_GAIN: f32 = 1.0;
-pub const SPK_MIX_GAIN: f32 = 1.0;
 // 简易回声抑制的触发阈值与最大衰减比例
 pub const ECHO_SUPPRESS_THRESHOLD: f32 = 0.15;
 pub const ECHO_SUPPRESS_MAX_REDUCTION: f32 = 0.6;
@@ -45,6 +40,45 @@ pub const FLUSH_INTERVAL_SECS: u64 = 5;
 pub const OUTPUT_BITS_PER_SAMPLE: u16 = 16;
 // 16-bit PCM 的抖动幅度，减少量化失真
 pub const DITHER_LEVEL: f32 = 1.0 / 32768.0;
+// 内置降噪/AGC/软限幅是否启用（用于与 WebRTC/RNNoise 协同）
+pub static INTERNAL_PROCESSING_ENABLED: AtomicBool = AtomicBool::new(false);
+
+#[napi(string_enum)]
+#[derive(Clone, Copy, PartialEq)]
+pub enum MixMode {
+    Split,
+    Mix,
+}
+
+#[napi(object)]
+#[derive(Clone, PartialEq)]
+pub struct RecordingConfig {
+    pub mix_mode: MixMode,
+    pub mic_gain: f64,
+    pub spk_gain: f64,
+    pub enable_webrtc_aec: bool,
+    pub enable_webrtc_ns: bool,
+    pub enable_webrtc_agc: bool,
+    pub enable_rnnoise: bool,
+    pub enable_internal_processing: bool,
+}
+
+impl Default for RecordingConfig {
+    fn default() -> Self {
+        Self {
+            mix_mode: MixMode::Split,
+            mic_gain: 1.0,
+            spk_gain: 1.0,
+            enable_webrtc_aec: true,
+            enable_webrtc_ns: true,
+            enable_webrtc_agc: true,
+            enable_rnnoise: true,
+            enable_internal_processing: false,
+        }
+    }
+}
+
+pub static RECORDING_CONFIG: OnceLock<Mutex<RecordingConfig>> = OnceLock::new();
 // 是否正在录制
 pub static IS_RECORDING: AtomicBool = AtomicBool::new(false);
 // 在线程间传递的音频数据包
@@ -69,6 +103,17 @@ pub fn report_func(info: Vec<SomeInfo>) {
     } else {
         println!("Warning: No report wnd listener registered yet!");
     }
+}
+
+pub fn get_recording_config() -> RecordingConfig {
+    let lock = RECORDING_CONFIG.get_or_init(|| Mutex::new(RecordingConfig::default()));
+    lock.lock().unwrap().clone()
+}
+
+pub fn update_recording_config(config: RecordingConfig) {
+    let lock = RECORDING_CONFIG.get_or_init(|| Mutex::new(RecordingConfig::default()));
+    *lock.lock().unwrap() = config.clone();
+    INTERNAL_PROCESSING_ENABLED.store(config.enable_internal_processing, std::sync::atomic::Ordering::SeqCst);
 }
 
 fn report_log(msg: String) {

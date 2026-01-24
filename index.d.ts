@@ -2,6 +2,24 @@
 /* eslint-disable */
 export declare function doInitialize(report: ((err: Error | null, arg: Array<SomeInfo>) => any), log: ((err: Error | null, arg: string) => any)): void
 
+export declare const enum MixMode {
+  Split = 'Split',
+  Mix = 'Mix'
+}
+
+export interface RecordingConfig {
+  mixMode: MixMode
+  micGain: number
+  spkGain: number
+  enableWebrtcAec: boolean
+  enableWebrtcNs: boolean
+  enableWebrtcAgc: boolean
+  enableRnnoise: boolean
+  enableInternalProcessing: boolean
+}
+
+export declare function setRecordingConfig(config: RecordingConfig): void
+
 export interface SomeInfo {
   pname: string
   pid: number

@@ -4,7 +4,8 @@
 use ringbuf::{HeapRb, Producer, Consumer}; 
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use std::sync::Arc;
-use crate::global::{TARGET_CHANNELS, TARGET_SAMPLE_RATE, RESAMPLER_CHUNK_SIZE, AppResult};
+use crate::global::{TARGET_CHANNELS, TARGET_SAMPLE_RATE, RESAMPLER_CHUNK_SIZE, AppResult, INTERNAL_PROCESSING_ENABLED};
+use std::sync::atomic::Ordering;
 
 pub struct AudioProcessor {
     resampler: Option<SincFixedIn<f32>>,
@@ -146,7 +147,7 @@ impl AudioProcessor {
             };
 
             if self.is_mic {
-                // C. 仅对麦克风执行高通、降噪与 AGC，避免破坏扬声器回放内容
+                // C. 仅对麦克风执行高通，降低低频轰鸣并提升语音清晰度
                 let mut rms_acc = 0.0f32;
                 for ch in 0..self.input_channels {
                     for i in 0..out_len {
@@ -155,33 +156,42 @@ impl AudioProcessor {
                         self.hp_prev_x[ch] = x;
                         self.hp_prev_y[ch] = y;
                         self.scratch_output[ch][i] = y;
-                        rms_acc += y * y;
                     }
                 }
-                let denom = (out_len * self.input_channels).max(1) as f32;
-                let rms = (rms_acc / denom).sqrt();
 
-                // 自适应噪声估计：低电平时更快贴合噪声地板
-                let ns_slope = if rms < self.ns_noise_rms { self.ns_attack } else { self.ns_release };
-                self.ns_noise_rms += ns_slope * (rms - self.ns_noise_rms);
-                let ns_threshold = self.ns_noise_rms * self.ns_threshold_ratio;
-                let ns_ratio = if rms <= ns_threshold && ns_threshold > 1e-6 {
-                    (rms / ns_threshold).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                };
-                let ns_gain = 1.0 - (1.0 - ns_ratio) * self.ns_max_reduction;
+                if INTERNAL_PROCESSING_ENABLED.load(Ordering::SeqCst) {
+                    // 内置降噪 + AGC：当未启用 WebRTC/RNNoise 时作为轻量兜底
+                    for ch in 0..self.input_channels {
+                        for i in 0..out_len {
+                            let y = self.scratch_output[ch][i];
+                            rms_acc += y * y;
+                        }
+                    }
+                    let denom = (out_len * self.input_channels).max(1) as f32;
+                    let rms = (rms_acc / denom).sqrt();
 
-                // 自动增益控制：将 RMS 拉向目标区间，限制最大增益避免噪声放大
-                let target_gain = if rms > 1e-6 { self.agc_target_rms / rms } else { 1.0 };
-                let s = if target_gain > self.agc_gain { self.agc_attack } else { self.agc_release };
-                self.agc_gain += s * (target_gain - self.agc_gain);
-                self.agc_gain = self.agc_gain.clamp(self.agc_min_gain, self.agc_max_gain);
-                let total_gain = ns_gain * self.agc_gain;
+                    // 自适应噪声估计：低电平时更快贴合噪声地板
+                    let ns_slope = if rms < self.ns_noise_rms { self.ns_attack } else { self.ns_release };
+                    self.ns_noise_rms += ns_slope * (rms - self.ns_noise_rms);
+                    let ns_threshold = self.ns_noise_rms * self.ns_threshold_ratio;
+                    let ns_ratio = if rms <= ns_threshold && ns_threshold > 1e-6 {
+                        (rms / ns_threshold).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    let ns_gain = 1.0 - (1.0 - ns_ratio) * self.ns_max_reduction;
 
-                for ch in 0..self.input_channels {
-                    for i in 0..out_len {
-                        self.scratch_output[ch][i] *= total_gain;
+                    // 自动增益控制：将 RMS 拉向目标区间，限制最大增益避免噪声放大
+                    let target_gain = if rms > 1e-6 { self.agc_target_rms / rms } else { 1.0 };
+                    let s = if target_gain > self.agc_gain { self.agc_attack } else { self.agc_release };
+                    self.agc_gain += s * (target_gain - self.agc_gain);
+                    self.agc_gain = self.agc_gain.clamp(self.agc_min_gain, self.agc_max_gain);
+                    let total_gain = ns_gain * self.agc_gain;
+
+                    for ch in 0..self.input_channels {
+                        for i in 0..out_len {
+                            self.scratch_output[ch][i] *= total_gain;
+                        }
                     }
                 }
             }
@@ -204,7 +214,7 @@ impl AudioProcessor {
                 }
 
                 // 仅对麦克风通道进行软限幅，避免削波失真
-                let (l, r) = if self.is_mic {
+                let (l, r) = if self.is_mic && INTERNAL_PROCESSING_ENABLED.load(Ordering::SeqCst) {
                     let l = (self.soft_k * left_sample).tanh() / self.soft_k.tanh();
                     let r = (self.soft_k * right_sample).tanh() / self.soft_k.tanh();
                     (l, r)

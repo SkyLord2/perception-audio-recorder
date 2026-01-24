@@ -17,6 +17,12 @@ rubato = "=0.14.1"   # 注意前面的等号
 ringbuf = "=0.3.3"   # 注意前面的等号
 napi = "3.0.0"
 napi-derive = "3.0.0"
+webrtc-audio-processing = { version = "0.4.0", optional = true, features = ["bundled"] }
+nnnoiseless = "=0.2.1"
+
+[features]
+default = []
+webrtc_apm = ["webrtc-audio-processing"]
 
 [dependencies.windows]
 version = "0.62.2"
