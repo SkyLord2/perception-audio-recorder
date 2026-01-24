@@ -110,6 +110,7 @@ const { instance: __napiInstance, module: __wasiModule, napiModule: __napiModule
 module.exports = __napiModule.exports
 module.exports.doInitialize = __napiModule.exports.doInitialize
 module.exports.MixMode = __napiModule.exports.MixMode
+module.exports.OutputFormat = __napiModule.exports.OutputFormat
 module.exports.setRecordingConfig = __napiModule.exports.setRecordingConfig
 module.exports.startRecord = __napiModule.exports.startRecord
 module.exports.stopRecord = __napiModule.exports.stopRecord

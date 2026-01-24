@@ -26,13 +26,16 @@ use crate::global::{
     AppResult, GLOBAL_LOG, GLOBAL_REPORT, IS_RECORDING, MONITOR_THREAD_ID, SOME_EVENT, SomeInfo, TARGET_CHANNELS, 
     TARGET_SAMPLE_RATE, get_current_format_time, report_func, CHANNEL_QUEUE_MAX_SECONDS, PACKET_QUEUE_MAX, 
     ECHO_SUPPRESS_THRESHOLD, ECHO_SUPPRESS_MAX_REDUCTION, FLUSH_INTERVAL_SECS, OUTPUT_BITS_PER_SAMPLE, DITHER_LEVEL,
-    RecordingConfig, MixMode, get_recording_config, update_recording_config
+    RecordingConfig, MixMode, OutputFormat, get_recording_config, update_recording_config
 };
 use crate::dsp::DspProcessor;
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use crossbeam_channel::bounded;
 use hound::WavSpec;
+use mp3lame_encoder::{Builder, DualPcm, FlushNoGap, Bitrate, Quality, Encoder, max_required_buffer_size};
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::collections::VecDeque;
 
 // 【新增】定义清理回调函数
@@ -107,6 +110,17 @@ pub fn start_record() -> napi::Result<()> {
     Ok(())
 }
 
+enum OutputWriter {
+    Wav(hound::WavWriter<BufWriter<File>>),
+    Mp3 {
+        encoder: Encoder,
+        file: BufWriter<File>,
+        buffer: Vec<u8>,
+        left: Vec<i16>,
+        right: Vec<i16>,
+    },
+}
+
 fn start_record_impl() -> AppResult<()> {
     let host = cpal::default_host();
     
@@ -137,23 +151,69 @@ fn start_record_impl() -> AppResult<()> {
 
     report_info_log!("录制系统已启动 (注意：这将阻塞 Node 主线程)...");
 
-    let spec = WavSpec {
-        channels: TARGET_CHANNELS as u16,
-        sample_rate: TARGET_SAMPLE_RATE as u32,
-        bits_per_sample: OUTPUT_BITS_PER_SAMPLE,
-        sample_format: hound::SampleFormat::Int,
+    let initial_config = get_recording_config();
+    let output_format = initial_config.output_format;
+    let filename = match output_format {
+        OutputFormat::Wav => format!("output_{}.wav", get_current_format_time("%Y-%m-%d_%H-%M-%S_%3f")),
+        OutputFormat::Mp3 => format!("output_{}.mp3", get_current_format_time("%Y-%m-%d_%H-%M-%S_%3f")),
     };
 
-    let filename = format!("output_{}.wav", get_current_format_time("%Y-%m-%d_%H-%M-%S_%3f"));
-    let mut writer = hound::WavWriter::create(filename, spec)?;
+    let mut output_writer = match output_format {
+        OutputFormat::Wav => {
+            let spec = WavSpec {
+                channels: TARGET_CHANNELS as u16,
+                sample_rate: TARGET_SAMPLE_RATE as u32,
+                bits_per_sample: OUTPUT_BITS_PER_SAMPLE,
+                sample_format: hound::SampleFormat::Int,
+            };
+            OutputWriter::Wav(hound::WavWriter::create(filename, spec)?)
+        }
+        OutputFormat::Mp3 => {
+            let mut builder = Builder::new().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::Other, "MP3 编码器初始化失败")
+            })?;
+            builder
+                .set_num_channels(TARGET_CHANNELS as u8)
+                .map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::Other, format!("MP3 编码器通道设置失败: {:?}", e))
+                })?;
+            builder
+                .set_sample_rate(TARGET_SAMPLE_RATE as u32)
+                .map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::Other, format!("MP3 编码器采样率设置失败: {:?}", e))
+                })?;
+            builder
+                .set_brate(Bitrate::Kbps192)
+                .map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::Other, format!("MP3 编码器码率设置失败: {:?}", e))
+                })?;
+            builder
+                .set_quality(Quality::Best)
+                .map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::Other, format!("MP3 编码器质量设置失败: {:?}", e))
+                })?;
+            let encoder = builder
+                .build()
+                .map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::Other, format!("MP3 编码器创建失败: {:?}", e))
+                })?;
+            OutputWriter::Mp3 {
+                encoder,
+                file: BufWriter::new(File::create(filename)?),
+                buffer: Vec::new(),
+                left: Vec::new(),
+                right: Vec::new(),
+            }
+        }
+    };
 
     let max_queue_samples = TARGET_SAMPLE_RATE * TARGET_CHANNELS * CHANNEL_QUEUE_MAX_SECONDS;
     let mut mic_queue: VecDeque<f32> = VecDeque::with_capacity(max_queue_samples);
     let mut spk_queue: VecDeque<f32> = VecDeque::with_capacity(max_queue_samples);
     let mut last_flush = Instant::now();
     let mut dither_state: u32 = 0x1234_5678;
-    let mut dsp = DspProcessor::new(get_recording_config())?;
-    let mut last_config = get_recording_config();
+    let mut dsp = DspProcessor::new(initial_config.clone())?;
+    let mut last_config = initial_config.clone();
 
     // 信号流图（采集 -> 处理 -> 写盘）
     // Mic/Spk 设备采集
@@ -210,57 +270,155 @@ fn start_record_impl() -> AppResult<()> {
 
                 dsp.process_mic_frame(&mut mic_mono, &spk_mono, &config)?;
 
-                for i in 0..frame_size {
-                    let mut mic_l = mic_mono[i];
-                    let mut mic_r = mic_mono[i];
-                    let spk_l = spk_l_buf[i];
-                    let spk_r = spk_r_buf[i];
+                match &mut output_writer {
+                    OutputWriter::Wav(writer) => {
+                        for i in 0..frame_size {
+                            let mut mic_l = mic_mono[i];
+                            let mut mic_r = mic_mono[i];
+                            let spk_l = spk_l_buf[i];
+                            let spk_r = spk_r_buf[i];
 
-                    if !dsp.webrtc_aec_active() {
-                        // 简易回声抑制：在未启用 WebRTC AEC 或不可用时降低回授
-                        // 默认阈值 0.15、最大衰减 0.6；回授明显可降低阈值或提高衰减，音色变薄可反向调整
-                        let spk_abs = spk_l.abs().max(spk_r.abs());
-                        if spk_abs > ECHO_SUPPRESS_THRESHOLD {
-                            let over = ((spk_abs - ECHO_SUPPRESS_THRESHOLD) / (1.0 - ECHO_SUPPRESS_THRESHOLD))
-                                .clamp(0.0, 1.0);
-                            let duck = 1.0 - over * ECHO_SUPPRESS_MAX_REDUCTION;
-                            mic_l *= duck;
-                            mic_r *= duck;
+                            if !dsp.webrtc_aec_active() {
+                                let spk_abs = spk_l.abs().max(spk_r.abs());
+                                if spk_abs > ECHO_SUPPRESS_THRESHOLD {
+                                    let over = ((spk_abs - ECHO_SUPPRESS_THRESHOLD) / (1.0 - ECHO_SUPPRESS_THRESHOLD))
+                                        .clamp(0.0, 1.0);
+                                    let duck = 1.0 - over * ECHO_SUPPRESS_MAX_REDUCTION;
+                                    mic_l *= duck;
+                                    mic_r *= duck;
+                                }
+                            }
+
+                            let mic_gain = config.mic_gain as f32;
+                            let spk_gain = config.spk_gain as f32;
+                            let (out_l, out_r) = match config.mix_mode {
+                                MixMode::Split => {
+                                    let mic_out = mic_l * mic_gain;
+                                    let spk_out = ((spk_l + spk_r) * 0.5) * spk_gain;
+                                    (mic_out, spk_out)
+                                }
+                                MixMode::Mix => {
+                                    let out_l = mic_l * mic_gain + spk_l * spk_gain;
+                                    let out_r = mic_r * mic_gain + spk_r * spk_gain;
+                                    (out_l, out_r)
+                                }
+                            };
+
+                            let sample_l = float_to_i16(out_l, &mut dither_state);
+                            let sample_r = float_to_i16(out_r, &mut dither_state);
+                            writer.write_sample(sample_l)?;
+                            writer.write_sample(sample_r)?;
                         }
                     }
+                    OutputWriter::Mp3 {
+                        encoder,
+                        file,
+                        buffer,
+                        left,
+                        right,
+                    } => {
+                        left.clear();
+                        right.clear();
+                        left.reserve(frame_size);
+                        right.reserve(frame_size);
+                        for i in 0..frame_size {
+                            let mut mic_l = mic_mono[i];
+                            let mut mic_r = mic_mono[i];
+                            let spk_l = spk_l_buf[i];
+                            let spk_r = spk_r_buf[i];
 
-                    let mic_gain = config.mic_gain as f32;
-                    let spk_gain = config.spk_gain as f32;
-                    let (out_l, out_r) = match config.mix_mode {
-                        MixMode::Split => {
-                            // 分轨：左=麦克风，右=扬声器
-                            let mic_out = mic_l * mic_gain;
-                            let spk_out = ((spk_l + spk_r) * 0.5) * spk_gain;
-                            (mic_out, spk_out)
-                        }
-                        MixMode::Mix => {
-                            let out_l = mic_l * mic_gain + spk_l * spk_gain;
-                            let out_r = mic_r * mic_gain + spk_r * spk_gain;
-                            (out_l, out_r)
-                        }
-                    };
+                            if !dsp.webrtc_aec_active() {
+                                let spk_abs = spk_l.abs().max(spk_r.abs());
+                                if spk_abs > ECHO_SUPPRESS_THRESHOLD {
+                                    let over = ((spk_abs - ECHO_SUPPRESS_THRESHOLD) / (1.0 - ECHO_SUPPRESS_THRESHOLD))
+                                        .clamp(0.0, 1.0);
+                                    let duck = 1.0 - over * ECHO_SUPPRESS_MAX_REDUCTION;
+                                    mic_l *= duck;
+                                    mic_r *= duck;
+                                }
+                            }
 
-                    let sample_l = float_to_i16(out_l, &mut dither_state);
-                    let sample_r = float_to_i16(out_r, &mut dither_state);
-                    writer.write_sample(sample_l)?;
-                    writer.write_sample(sample_r)?;
+                            let mic_gain = config.mic_gain as f32;
+                            let spk_gain = config.spk_gain as f32;
+                            let (out_l, out_r) = match config.mix_mode {
+                                MixMode::Split => {
+                                    let mic_out = mic_l * mic_gain;
+                                    let spk_out = ((spk_l + spk_r) * 0.5) * spk_gain;
+                                    (mic_out, spk_out)
+                                }
+                                MixMode::Mix => {
+                                    let out_l = mic_l * mic_gain + spk_l * spk_gain;
+                                    let out_r = mic_r * mic_gain + spk_r * spk_gain;
+                                    (out_l, out_r)
+                                }
+                            };
+
+                            let sample_l = float_to_i16(out_l, &mut dither_state);
+                            let sample_r = float_to_i16(out_r, &mut dither_state);
+                            left.push(sample_l);
+                            right.push(sample_r);
+                        }
+
+                        let input = DualPcm {
+                            left: &left[..],
+                            right: &right[..],
+                        };
+                        buffer.clear();
+                        buffer.reserve(max_required_buffer_size(left.len()));
+                        let encoded_size = encoder.encode(input, buffer.spare_capacity_mut()).map_err(|e| {
+                            std::io::Error::new(std::io::ErrorKind::Other, format!("MP3 编码失败: {:?}", e))
+                        })?;
+                        unsafe {
+                            buffer.set_len(encoded_size);
+                        }
+                        if !buffer.is_empty() {
+                            file.write_all(&buffer)?;
+                        }
+                    }
                 }
             }
             if last_flush.elapsed() >= Duration::from_secs(FLUSH_INTERVAL_SECS) {
-                writer.flush()?;
+                match &mut output_writer {
+                    OutputWriter::Wav(writer) => {
+                        writer.flush()?;
+                    }
+                    OutputWriter::Mp3 { file, .. } => {
+                        file.flush()?;
+                    }
+                }
                 last_flush = Instant::now();
             }
         }
     }
 
-    // 循环结束后，writer 离开作用域时会自动 flush 并关闭文件
     report_info_log!("录制循环结束，文件保存中...");
-    writer.flush()?;
+    match output_writer {
+        OutputWriter::Wav(mut writer) => {
+            writer.flush()?;
+        }
+        OutputWriter::Mp3 {
+            mut encoder,
+            mut file,
+            mut buffer,
+            ..
+        } => {
+            buffer.clear();
+            buffer.reserve(7200);
+            let encoded_size =
+                encoder
+                    .flush::<FlushNoGap>(buffer.spare_capacity_mut())
+                    .map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::Other, format!("MP3 收尾失败: {:?}", e))
+                    })?;
+            unsafe {
+                buffer.set_len(encoded_size);
+            }
+            if !buffer.is_empty() {
+                file.write_all(&buffer)?;
+            }
+            file.flush()?;
+        }
+    }
     Ok(())
 }
 

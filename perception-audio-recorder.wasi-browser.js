@@ -58,6 +58,7 @@ const {
 export default __napiModule.exports
 export const doInitialize = __napiModule.exports.doInitialize
 export const MixMode = __napiModule.exports.MixMode
+export const OutputFormat = __napiModule.exports.OutputFormat
 export const setRecordingConfig = __napiModule.exports.setRecordingConfig
 export const startRecord = __napiModule.exports.startRecord
 export const stopRecord = __napiModule.exports.stopRecord

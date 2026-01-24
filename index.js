@@ -578,6 +578,7 @@ if (!nativeBinding) {
 module.exports = nativeBinding
 module.exports.doInitialize = nativeBinding.doInitialize
 module.exports.MixMode = nativeBinding.MixMode
+module.exports.OutputFormat = nativeBinding.OutputFormat
 module.exports.setRecordingConfig = nativeBinding.setRecordingConfig
 module.exports.startRecord = nativeBinding.startRecord
 module.exports.stopRecord = nativeBinding.stopRecord

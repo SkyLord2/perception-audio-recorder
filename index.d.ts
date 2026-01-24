@@ -7,8 +7,14 @@ export declare const enum MixMode {
   Mix = 'Mix'
 }
 
+export declare const enum OutputFormat {
+  Wav = 'Wav',
+  Mp3 = 'Mp3'
+}
+
 export interface RecordingConfig {
   mixMode: MixMode
+  outputFormat: OutputFormat
   micGain: number
   spkGain: number
   enableWebrtcAec: boolean

@@ -54,10 +54,18 @@ pub enum MixMode {
     Mix,
 }
 
+#[napi(string_enum)]
+#[derive(Clone, Copy, PartialEq)]
+pub enum OutputFormat {
+    Wav,
+    Mp3,
+}
+
 #[napi(object)]
 #[derive(Clone, PartialEq)]
 pub struct RecordingConfig {
     pub mix_mode: MixMode,
+    pub output_format: OutputFormat,
     pub mic_gain: f64,
     pub spk_gain: f64,
     pub enable_webrtc_aec: bool,
@@ -77,6 +85,7 @@ impl Default for RecordingConfig {
         // enable_internal_processing=false：仅在未启用 WebRTC/RNNoise 时开启兜底处理
         Self {
             mix_mode: MixMode::Split,
+            output_format: OutputFormat::Mp3,
             mic_gain: 1.0,
             spk_gain: 1.0,
             enable_webrtc_aec: true,

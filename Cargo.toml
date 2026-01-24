@@ -13,6 +13,7 @@ chrono = "0.4"
 cpal = "0.17.1"
 crossbeam-channel = "0.5.15"
 hound = "3.5.1"
+mp3lame-encoder = "0.2.2"
 rubato = "=0.14.1"   # 注意前面的等号
 ringbuf = "=0.3.3"   # 注意前面的等号
 napi = "3.0.0"
