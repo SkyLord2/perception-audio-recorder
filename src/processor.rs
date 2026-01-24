@@ -82,6 +82,15 @@ impl AudioProcessor {
         let rc = 1.0 / (2.0 * std::f32::consts::PI * fc);
         let hp_alpha = rc / (rc + dt);
 
+        // 内置处理默认值与调参建议（仅在 enable_internal_processing=true 时生效）：
+        // 高通 fc=80Hz：提升人声清晰度；低频保留更多可降到 60Hz
+        // AGC target_rms=0.2：提高会更响但易泵动，降低更自然
+        // AGC attack=0.05 / release=0.02：attack 大更跟手，release 大更平滑
+        // AGC min/max=0.5~4.0：max 越大噪声越易被抬升
+        // NS noise_rms=0.01：初始噪声地板估计，嘶声明显可略增
+        // NS attack=0.1 / release=0.02：attack 大更快贴合噪声，release 大更稳
+        // NS threshold_ratio=1.5 / max_reduction=0.6：比值越低抑制越强，过低易“水声”
+        // soft_k=2.0：软限幅强度，数值小更易削顶，数值大更柔和
         Ok(Self {
             resampler,
             producer,

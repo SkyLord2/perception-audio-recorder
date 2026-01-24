@@ -32,13 +32,17 @@ pub const CHANNEL_QUEUE_MAX_SECONDS: usize = 2;
 // 线程间音频包队列长度上限，防止回调阻塞
 pub const PACKET_QUEUE_MAX: usize = 128;
 // 简易回声抑制的触发阈值与最大衰减比例
+// 默认：阈值 0.15，最大衰减 0.6
+// 调参建议：回授明显时降低阈值或提高衰减；人声发虚时提高阈值或降低衰减
 pub const ECHO_SUPPRESS_THRESHOLD: f32 = 0.15;
 pub const ECHO_SUPPRESS_MAX_REDUCTION: f32 = 0.6;
 // 长时间录制时的周期性 flush 间隔
 pub const FLUSH_INTERVAL_SECS: u64 = 5;
 // 输出 WAV 位深（16-bit PCM）以降低磁盘占用
+// 默认 16bit；如更关注动态范围可改 24bit，但磁盘占用与吞吐增加
 pub const OUTPUT_BITS_PER_SAMPLE: u16 = 16;
 // 16-bit PCM 的抖动幅度，减少量化失真
+// 默认 1/32768；噪声底抬升明显时可调低，但低电平量化纹理会更重
 pub const DITHER_LEVEL: f32 = 1.0 / 32768.0;
 // 内置降噪/AGC/软限幅是否启用（用于与 WebRTC/RNNoise 协同）
 pub static INTERNAL_PROCESSING_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -65,6 +69,12 @@ pub struct RecordingConfig {
 
 impl Default for RecordingConfig {
     fn default() -> Self {
+        // 默认值与调参建议：
+        // mix_mode=Split：左声道麦克风、右声道扬声器，便于后期单独处理；实时混音可改 Mix
+        // mic_gain/spk_gain=1.0：线性增益，建议 0.5~2.0 之间微调，避免 >2.0 引入削波
+        // enable_webrtc_aec/ns/agc=true：启用 WebRTC APM 的核心处理链路
+        // enable_rnnoise=true：在 WebRTC 之后做额外降噪，噪声泵感明显时可关闭
+        // enable_internal_processing=false：仅在未启用 WebRTC/RNNoise 时开启兜底处理
         Self {
             mix_mode: MixMode::Split,
             mic_gain: 1.0,

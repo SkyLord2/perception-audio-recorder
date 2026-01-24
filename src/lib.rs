@@ -160,6 +160,16 @@ fn start_record_impl() -> AppResult<()> {
     let mut dsp = DspProcessor::new(get_recording_config())?;
     let mut last_config = get_recording_config();
 
+    // 信号流图（采集 -> 处理 -> 写盘）
+    // Mic/Spk 设备采集
+    //   -> AudioProcessor（重采样/高通/内置兜底 NS/AGC）
+    //   -> 有界队列聚合
+    //   -> DspProcessor（WebRTC AEC/NS/AGC + RNNoise）
+    //   -> 简易回声抑制兜底（仅 AEC 关闭时）
+    //   -> 混音/分轨与增益
+    //   -> 抖动量化（16-bit PCM）
+    //   -> WAV Writer
+
     // 【关键修改】循环条件改为检测 AtomicBool
     while IS_RECORDING.load(Ordering::SeqCst) {
         // 使用 recv_timeout 避免在停止时被永久阻塞
@@ -213,6 +223,7 @@ fn start_record_impl() -> AppResult<()> {
 
                     if !dsp.webrtc_aec_active() {
                         // 简易回声抑制：在未启用 WebRTC AEC 或不可用时降低回授
+                        // 默认阈值 0.15、最大衰减 0.6；回授明显可降低阈值或提高衰减，音色变薄可反向调整
                         let spk_abs = spk_l.abs().max(spk_r.abs());
                         if spk_abs > ECHO_SUPPRESS_THRESHOLD {
                             let over = ((spk_abs - ECHO_SUPPRESS_THRESHOLD) / (1.0 - ECHO_SUPPRESS_THRESHOLD))
@@ -326,6 +337,10 @@ impl DspProcessor {
         {
             if config.enable_webrtc_aec || config.enable_webrtc_ns || config.enable_webrtc_agc {
                 // 启用 WebRTC APM 时固定为 48kHz/单声道处理
+                // 默认配置建议：
+                // AEC=High：适合大多数桌面回放场景；过度抑制可改为 Moderate
+                // NS=High：噪声更低但易有“水声”，可改为 Moderate/Low
+                // AGC=AdaptiveDigital：目标电平 3dBFS、压缩增益 9dB；过响可降低增益或提高目标电平
                 let init = InitializationConfig {
                     sample_rate: SampleRate::Hz48000,
                     num_capture_channels: 1,
