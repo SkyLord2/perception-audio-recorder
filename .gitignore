@@ -129,3 +129,5 @@ Cargo.lock
 !.yarn/sdks
 !.yarn/versions
 /npm
+*.wav
+*.mp3
