@@ -1,44 +1,49 @@
-// src/processor.rs
-
-// 修正引入路径：使用 HeapRb (堆分配环形缓冲)
-use ringbuf::{HeapRb, Producer, Consumer}; 
-use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+use std::collections::VecDeque;
 use std::sync::Arc;
-use crate::global::{TARGET_CHANNELS, TARGET_SAMPLE_RATE, RESAMPLER_CHUNK_SIZE, AppResult};
+
+use ringbuf::{Consumer, HeapRb, Producer};
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
+use sonora::config::{EchoCanceller, GainController2, NoiseSuppression};
+use sonora::{AudioProcessing, Config, StreamConfig};
+
+use crate::global::{
+    AppResult, ENABLE_MIC_AUTO_GAIN_CONTROL, ENABLE_MIC_NOISE_SUPPRESSION,
+    RESAMPLER_CHUNK_SIZE,
+};
 
 pub struct AudioProcessor {
     resampler: Option<SincFixedIn<f32>>,
-    
-    // 修正：在 ringbuf 0.3 中，split() 返回的 Producer/Consumer 需要知道底层的容器类型。
-    // HeapRb<f32> 默认会被 wrap 进 Arc，所以这里泛型参数是 Arc<HeapRb<f32>>
     producer: Producer<f32, Arc<HeapRb<f32>>>,
     consumer: Consumer<f32, Arc<HeapRb<f32>>>,
-    
-    is_mic: bool,
     use_resampler: bool,
     input_channels: usize,
-    scratch_input: Vec<Vec<f32>>, 
+    target_sample_rate: usize,
+    output_channels: usize,
+    is_mic: bool,
+    aec_enabled: bool,
+    scratch_input: Vec<Vec<f32>>,
     scratch_output: Vec<Vec<f32>>,
-    hp_prev_x: Vec<f32>,
-    hp_prev_y: Vec<f32>,
-    hp_alpha: f32,
-    agc_gain: f32,
-    agc_target_rms: f32,
-    agc_attack: f32,
-    agc_release: f32,
-    agc_min_gain: f32,
-    agc_max_gain: f32,
-    ns_noise_rms: f32,
-    ns_attack: f32,
-    ns_release: f32,
-    ns_threshold_ratio: f32,
-    ns_max_reduction: f32,
-    soft_k: f32,
+    apm: Option<AudioProcessing>,
+    apm_frame_samples: usize,
+    capture_frame_queue: VecDeque<f32>,
+    render_frame_queue: VecDeque<f32>,
+    apm_capture_in: Vec<Vec<f32>>,
+    apm_capture_out: Vec<Vec<f32>>,
+    apm_render_in: Vec<Vec<f32>>,
+    apm_render_out: Vec<Vec<f32>>,
 }
 
 impl AudioProcessor {
-    pub fn new(source_sample_rate: usize, input_channels: usize, is_mic: bool) -> AppResult<Self> {
-        // --- Rubato 配置 (保持不变) ---
+    pub fn new(
+        source_sample_rate: usize,
+        target_sample_rate: usize,
+        input_channels: usize,
+        output_channels: usize,
+        is_mic: bool,
+        enable_aec: bool,
+    ) -> AppResult<Self> {
         let params = SincInterpolationParameters {
             sinc_len: 256,
             f_cutoff: 0.95,
@@ -47,70 +52,182 @@ impl AudioProcessor {
             window: WindowFunction::BlackmanHarris2,
         };
 
-        let ratio = TARGET_SAMPLE_RATE as f64 / source_sample_rate as f64;
-        let use_resampler = source_sample_rate != TARGET_SAMPLE_RATE;
-        // 当源采样率已匹配目标采样率时，绕过重采样以降低延迟与失真
+        let ratio = target_sample_rate as f64 / source_sample_rate as f64;
+        let use_resampler = source_sample_rate != target_sample_rate;
         let resampler = if use_resampler {
             Some(SincFixedIn::<f32>::new(
                 ratio,
                 2.0,
                 params,
-                RESAMPLER_CHUNK_SIZE, 
+                RESAMPLER_CHUNK_SIZE,
                 input_channels,
             )?)
         } else {
             None
         };
 
-        // --- Ringbuf 0.3.3 修正初始化 ---
-        let buffer_len = RESAMPLER_CHUNK_SIZE * input_channels * 4; 
-        
-        // 1. 创建堆分配的 RingBuffer
+        let buffer_len = RESAMPLER_CHUNK_SIZE * input_channels * 4;
         let rb = HeapRb::<f32>::new(buffer_len);
-        
-        // 2. split() 会自动将 rb 包装在 Arc 中，并返回两个拥有者
         let (producer, consumer) = rb.split();
 
         let scratch_input = vec![vec![0.0; RESAMPLER_CHUNK_SIZE]; input_channels];
         let output_frames_max = (RESAMPLER_CHUNK_SIZE as f64 * ratio).ceil() as usize + 10;
         let scratch_output = vec![vec![0.0; output_frames_max]; input_channels];
-        let hp_prev_x = vec![0.0; input_channels];
-        let hp_prev_y = vec![0.0; input_channels];
-        let fc = 80.0;
-        let dt = 1.0 / TARGET_SAMPLE_RATE as f32;
-        let rc = 1.0 / (2.0 * std::f32::consts::PI * fc);
-        let hp_alpha = rc / (rc + dt);
 
         Ok(Self {
             resampler,
             producer,
             consumer,
-            is_mic,
             use_resampler,
             input_channels,
+            target_sample_rate,
+            output_channels,
+            is_mic,
+            aec_enabled: false,
             scratch_input,
             scratch_output,
-            hp_prev_x,
-            hp_prev_y,
-            hp_alpha,
-            agc_gain: 1.0,
-            agc_target_rms: 0.2,
-            agc_attack: 0.05,
-            agc_release: 0.02,
-            agc_min_gain: 0.5,
-            agc_max_gain: 4.0,
-            ns_noise_rms: 0.01,
-            ns_attack: 0.1,
-            ns_release: 0.02,
-            ns_threshold_ratio: 1.5,
-            ns_max_reduction: 0.6,
-            soft_k: 2.0,
+            apm: None,
+            apm_frame_samples: 0,
+            capture_frame_queue: VecDeque::new(),
+            render_frame_queue: VecDeque::new(),
+            apm_capture_in: Vec::new(),
+            apm_capture_out: Vec::new(),
+            apm_render_in: Vec::new(),
+            apm_render_out: Vec::new(),
+        })
+        .map(|mut processor| {
+            processor.rebuild_apm(enable_aec);
+            processor
         })
     }
 
-    pub fn process(&mut self, input: &[f32]) -> Vec<f32> {
-        // 修正：0.3.3 中推荐使用 push_slice 提高性能，如果版本不支持可以使用循环 push
-        // 这里为了最稳妥的兼容性，我们使用循环 push
+    pub fn aec_enabled(&self) -> bool {
+        self.aec_enabled
+    }
+
+    pub fn set_aec_enabled(&mut self, enable_aec: bool) {
+        self.rebuild_apm(enable_aec);
+    }
+
+    fn rebuild_apm(&mut self, enable_aec: bool) {
+        self.aec_enabled = self.is_mic && enable_aec;
+        self.apm = None;
+        self.apm_frame_samples = 0;
+        self.capture_frame_queue.clear();
+        self.render_frame_queue.clear();
+        self.apm_capture_in.clear();
+        self.apm_capture_out.clear();
+        self.apm_render_in.clear();
+        self.apm_render_out.clear();
+
+        if !self.is_mic
+            || (!ENABLE_MIC_NOISE_SUPPRESSION
+                && !ENABLE_MIC_AUTO_GAIN_CONTROL
+                && !self.aec_enabled)
+        {
+            return;
+        }
+
+        let stream_config =
+            StreamConfig::new(self.target_sample_rate as u32, self.output_channels as u16);
+        self.apm_frame_samples = stream_config.num_frames();
+        let config = Config {
+            echo_canceller: if self.aec_enabled {
+                Some(EchoCanceller::default())
+            } else {
+                None
+            },
+            noise_suppression: if ENABLE_MIC_NOISE_SUPPRESSION {
+                Some(NoiseSuppression::default())
+            } else {
+                None
+            },
+            gain_controller2: if ENABLE_MIC_AUTO_GAIN_CONTROL {
+                Some(GainController2::default())
+            } else {
+                None
+            },
+            ..Default::default()
+        };
+        self.apm_capture_in = vec![vec![0.0; self.apm_frame_samples]; self.output_channels];
+        self.apm_capture_out = vec![vec![0.0; self.apm_frame_samples]; self.output_channels];
+        self.apm_render_in = vec![vec![0.0; self.apm_frame_samples]; self.output_channels];
+        self.apm_render_out = vec![vec![0.0; self.apm_frame_samples]; self.output_channels];
+        self.apm = Some(
+            AudioProcessing::builder()
+                .config(config)
+                .capture_config(stream_config)
+                .render_config(stream_config)
+                .build(),
+        );
+    }
+
+    pub fn process_capture(&mut self, input: &[f32]) -> AppResult<Vec<f32>> {
+        let mapped = self.resample_and_map(input)?;
+        if !self.is_mic || self.apm.is_none() {
+            return Ok(mapped);
+        }
+
+        let frame_samples = self.apm_frame_samples * self.output_channels;
+        // APM 只能按固定 10ms 帧工作，这里先把重采样后的交错数据缓存起来，
+        // 等攒够一整帧后再送入 3A，避免出现半帧处理导致的状态紊乱。
+        self.capture_frame_queue.extend(mapped.iter().copied());
+
+        let mut output = Vec::with_capacity(mapped.len());
+        while self.capture_frame_queue.len() >= frame_samples {
+            Self::pop_interleaved_frame_into_planar(
+                &mut self.capture_frame_queue,
+                &mut self.apm_capture_in,
+                self.output_channels,
+                self.apm_frame_samples,
+            );
+
+            let input_refs = Self::planar_refs(&self.apm_capture_in);
+            let mut output_refs = Self::planar_mut_refs(&mut self.apm_capture_out);
+            if let Some(apm) = self.apm.as_mut() {
+                apm.process_capture_f32(&input_refs, &mut output_refs)?;
+            }
+
+            let base = output.len();
+            output.resize(base + frame_samples, 0.0);
+            Self::interleave_from(&self.apm_capture_out, &mut output[base..base + frame_samples]);
+        }
+
+        Ok(output)
+    }
+
+    pub fn process_render(&mut self, input: &[f32]) -> AppResult<Vec<f32>> {
+        self.resample_and_map(input)
+    }
+
+    pub fn feed_render_frame(&mut self, render_samples: &[f32]) -> AppResult<()> {
+        if !self.is_mic || self.apm.is_none() || !self.aec_enabled {
+            return Ok(());
+        }
+
+        let frame_samples = self.apm_frame_samples * self.output_channels;
+        // render 链路只承担 AEC 参考流输入职责，因此同样按固定帧送入 APM，
+        // 但不把处理结果回传到业务侧。
+        self.render_frame_queue.extend(render_samples.iter().copied());
+
+        while self.render_frame_queue.len() >= frame_samples {
+            Self::pop_interleaved_frame_into_planar(
+                &mut self.render_frame_queue,
+                &mut self.apm_render_in,
+                self.output_channels,
+                self.apm_frame_samples,
+            );
+            let input_refs = Self::planar_refs(&self.apm_render_in);
+            let mut output_refs = Self::planar_mut_refs(&mut self.apm_render_out);
+            if let Some(apm) = self.apm.as_mut() {
+                apm.process_render_f32(&input_refs, &mut output_refs)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn resample_and_map(&mut self, input: &[f32]) -> AppResult<Vec<f32>> {
         for &sample in input {
             let _ = self.producer.push(sample);
         }
@@ -118,104 +235,90 @@ impl AudioProcessor {
         let mut final_output = Vec::new();
         let needed_samples = RESAMPLER_CHUNK_SIZE * self.input_channels;
 
-        // len() 是 0.3.3 的标准方法
         while self.consumer.len() >= needed_samples {
-            // A. Interleaved -> Planar
             for i in 0..RESAMPLER_CHUNK_SIZE {
                 for ch in 0..self.input_channels {
-                    // pop() 返回 Option<T>
-                    let sample = self.consumer.pop().unwrap();
+                    let sample = self.consumer.pop().unwrap_or(0.0);
                     self.scratch_input[ch][i] = sample;
                 }
             }
 
             let out_len = if self.use_resampler {
-                // B. 重采样：统一到目标采样率
-                let (_, out_len) = self.resampler.as_mut().unwrap().process_into_buffer(
-                    &self.scratch_input,
-                    &mut self.scratch_output,
-                    None
-                ).expect("Resampling internal error");
+                let (_, out_len) = self
+                    .resampler
+                    .as_mut()
+                    .expect("resampler missing when use_resampler=true")
+                    .process_into_buffer(&self.scratch_input, &mut self.scratch_output, None)?;
                 out_len
             } else {
-                // B. 采样率一致时直接拷贝，避免不必要的插值失真
                 for ch in 0..self.input_channels {
-                    self.scratch_output[ch][..RESAMPLER_CHUNK_SIZE].copy_from_slice(&self.scratch_input[ch]);
+                    self.scratch_output[ch][..RESAMPLER_CHUNK_SIZE]
+                        .copy_from_slice(&self.scratch_input[ch]);
                 }
                 RESAMPLER_CHUNK_SIZE
             };
 
-            if self.is_mic {
-                // C. 仅对麦克风执行高通、降噪与 AGC，避免破坏扬声器回放内容
-                let mut rms_acc = 0.0f32;
-                for ch in 0..self.input_channels {
-                    for i in 0..out_len {
-                        let x = self.scratch_output[ch][i];
-                        let y = self.hp_alpha * (self.hp_prev_y[ch] + x - self.hp_prev_x[ch]);
-                        self.hp_prev_x[ch] = x;
-                        self.hp_prev_y[ch] = y;
-                        self.scratch_output[ch][i] = y;
-                        rms_acc += y * y;
-                    }
-                }
-                let denom = (out_len * self.input_channels).max(1) as f32;
-                let rms = (rms_acc / denom).sqrt();
-
-                // 自适应噪声估计：低电平时更快贴合噪声地板
-                let ns_slope = if rms < self.ns_noise_rms { self.ns_attack } else { self.ns_release };
-                self.ns_noise_rms += ns_slope * (rms - self.ns_noise_rms);
-                let ns_threshold = self.ns_noise_rms * self.ns_threshold_ratio;
-                let ns_ratio = if rms <= ns_threshold && ns_threshold > 1e-6 {
-                    (rms / ns_threshold).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                };
-                let ns_gain = 1.0 - (1.0 - ns_ratio) * self.ns_max_reduction;
-
-                // 自动增益控制：将 RMS 拉向目标区间，限制最大增益避免噪声放大
-                let target_gain = if rms > 1e-6 { self.agc_target_rms / rms } else { 1.0 };
-                let s = if target_gain > self.agc_gain { self.agc_attack } else { self.agc_release };
-                self.agc_gain += s * (target_gain - self.agc_gain);
-                self.agc_gain = self.agc_gain.clamp(self.agc_min_gain, self.agc_max_gain);
-                let total_gain = ns_gain * self.agc_gain;
-
-                for ch in 0..self.input_channels {
-                    for i in 0..out_len {
-                        self.scratch_output[ch][i] *= total_gain;
-                    }
-                }
-            }
-
-            // C. Planar -> Interleaved & Channel Mapping
             let start_idx = final_output.len();
-            final_output.resize(start_idx + out_len * TARGET_CHANNELS, 0.0);
-            
+            final_output.resize(start_idx + out_len * self.output_channels, 0.0);
+
             for i in 0..out_len {
                 let left_sample;
                 let right_sample;
 
                 if self.input_channels == 1 {
-                    let s = self.scratch_output[0][i];
-                    left_sample = s;
-                    right_sample = s;
+                    let sample = self.scratch_output[0][i];
+                    left_sample = sample;
+                    right_sample = sample;
                 } else {
                     left_sample = self.scratch_output[0][i];
-                    right_sample = if self.input_channels > 1 { self.scratch_output[1][i] } else { left_sample };
+                    right_sample = self.scratch_output[1][i];
                 }
 
-                // 仅对麦克风通道进行软限幅，避免削波失真
-                let (l, r) = if self.is_mic {
-                    let l = (self.soft_k * left_sample).tanh() / self.soft_k.tanh();
-                    let r = (self.soft_k * right_sample).tanh() / self.soft_k.tanh();
-                    (l, r)
+                if self.output_channels == 1 {
+                    final_output[start_idx + i] = (left_sample + right_sample) * 0.5;
                 } else {
-                    (left_sample, right_sample)
-                };
-                final_output[start_idx + i * 2] = l;
-                final_output[start_idx + i * 2 + 1] = r;
+                    final_output[start_idx + i * 2] = left_sample;
+                    final_output[start_idx + i * 2 + 1] = right_sample;
+                }
             }
         }
 
-        final_output
+        Ok(final_output)
+    }
+
+    fn pop_interleaved_frame_into_planar(
+        queue: &mut VecDeque<f32>,
+        output: &mut [Vec<f32>],
+        output_channels: usize,
+        frame_samples: usize,
+    ) {
+        // 这里直接把交错队列中的一整帧样本写入可复用的 planar 缓冲区，
+        // 避免在实时音频热路径上反复创建临时 Vec。
+        for frame_idx in 0..frame_samples {
+            for ch in 0..output_channels {
+                output[ch][frame_idx] = queue.pop_front().unwrap_or(0.0);
+            }
+        }
+    }
+
+    fn planar_refs<'a>(planar: &'a [Vec<f32>]) -> Vec<&'a [f32]> {
+        planar.iter().map(|channel| channel.as_slice()).collect()
+    }
+
+    fn planar_mut_refs<'a>(planar: &'a mut [Vec<f32>]) -> Vec<&'a mut [f32]> {
+        planar
+            .iter_mut()
+            .map(|channel| channel.as_mut_slice())
+            .collect()
+    }
+
+    fn interleave_from(planar: &[Vec<f32>], output: &mut [f32]) {
+        let channels = planar.len();
+        let frames = planar.first().map(|channel| channel.len()).unwrap_or(0);
+        for frame_idx in 0..frames {
+            for ch in 0..channels {
+                output[frame_idx * channels + ch] = planar[ch][frame_idx];
+            }
+        }
     }
 }

@@ -1,0 +1,26 @@
+[package]
+categories             = ["multimedia::audio"]
+description            = "Automatic Gain Control 2 (AGC2) with RNN VAD for WebRTC Audio Processing"
+edition.workspace      = true
+keywords               = ["webrtc", "audio", "agc", "gain-control", "vad"]
+license.workspace      = true
+name                   = "sonora-agc2"
+readme                 = "README.md"
+repository.workspace   = true
+rust-version.workspace = true
+version                = "0.1.0"
+
+[lints]
+workspace = true
+
+[dependencies]
+bytemuck            = { workspace = true }
+derive_more         = { workspace = true }
+sonora-common-audio = { workspace = true }
+sonora-fft          = { workspace = true }
+sonora-simd         = { workspace = true }
+tracing             = { workspace = true }
+
+[dev-dependencies]
+proptest      = { workspace = true }
+test-strategy = { workspace = true }

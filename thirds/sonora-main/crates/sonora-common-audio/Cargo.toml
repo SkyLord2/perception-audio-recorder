@@ -1,0 +1,18 @@
+[package]
+categories             = ["multimedia::audio", "algorithms"]
+description            = "DSP primitives for WebRTC Audio Processing (resamplers, filters, channel buffers)"
+edition.workspace      = true
+keywords               = ["dsp", "audio", "biquad", "resampler", "channel-buffer"]
+license.workspace      = true
+name                   = "sonora-common-audio"
+readme                 = "README.md"
+repository.workspace   = true
+rust-version.workspace = true
+version                = "0.1.0"
+
+[lints]
+workspace = true
+
+[dependencies]
+derive_more = { workspace = true }
+sonora-simd = { workspace = true }

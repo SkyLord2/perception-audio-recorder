@@ -1,0 +1,18 @@
+[package]
+categories             = ["algorithms", "multimedia::audio"]
+description            = "FFT implementations for WebRTC Audio Processing (Ooura, PFFFT)"
+edition.workspace      = true
+keywords               = ["fft", "audio", "dsp", "ooura"]
+license.workspace      = true
+name                   = "sonora-fft"
+readme                 = "README.md"
+repository.workspace   = true
+rust-version.workspace = true
+version                = "0.1.0"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest      = { workspace = true }
+test-strategy = { workspace = true }

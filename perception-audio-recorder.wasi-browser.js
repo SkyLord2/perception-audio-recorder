@@ -57,5 +57,16 @@ const {
 })
 export default __napiModule.exports
 export const doInitialize = __napiModule.exports.doInitialize
-export const startRecord = __napiModule.exports.startRecord
-export const stopRecord = __napiModule.exports.stopRecord
+export const getRecordDuration = __napiModule.exports.getRecordDuration
+export const isPaused = __napiModule.exports.isPaused
+export const isRecording = __napiModule.exports.isRecording
+export const listenPauseRecordingAudio = __napiModule.exports.listenPauseRecordingAudio
+export const listenRecordingError = __napiModule.exports.listenRecordingError
+export const listenRecordingProgress = __napiModule.exports.listenRecordingProgress
+export const listenResumeRecordingAudio = __napiModule.exports.listenResumeRecordingAudio
+export const listenStartRecordingAudio = __napiModule.exports.listenStartRecordingAudio
+export const listenStopRecordingAudio = __napiModule.exports.listenStopRecordingAudio
+export const pauseRecording = __napiModule.exports.pauseRecording
+export const resumeRecording = __napiModule.exports.resumeRecording
+export const startRecording = __napiModule.exports.startRecording
+export const stopRecording = __napiModule.exports.stopRecording

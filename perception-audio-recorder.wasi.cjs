@@ -109,5 +109,16 @@ const { instance: __napiInstance, module: __wasiModule, napiModule: __napiModule
 })
 module.exports = __napiModule.exports
 module.exports.doInitialize = __napiModule.exports.doInitialize
-module.exports.startRecord = __napiModule.exports.startRecord
-module.exports.stopRecord = __napiModule.exports.stopRecord
+module.exports.getRecordDuration = __napiModule.exports.getRecordDuration
+module.exports.isPaused = __napiModule.exports.isPaused
+module.exports.isRecording = __napiModule.exports.isRecording
+module.exports.listenPauseRecordingAudio = __napiModule.exports.listenPauseRecordingAudio
+module.exports.listenRecordingError = __napiModule.exports.listenRecordingError
+module.exports.listenRecordingProgress = __napiModule.exports.listenRecordingProgress
+module.exports.listenResumeRecordingAudio = __napiModule.exports.listenResumeRecordingAudio
+module.exports.listenStartRecordingAudio = __napiModule.exports.listenStartRecordingAudio
+module.exports.listenStopRecordingAudio = __napiModule.exports.listenStopRecordingAudio
+module.exports.pauseRecording = __napiModule.exports.pauseRecording
+module.exports.resumeRecording = __napiModule.exports.resumeRecording
+module.exports.startRecording = __napiModule.exports.startRecording
+module.exports.stopRecording = __napiModule.exports.stopRecording

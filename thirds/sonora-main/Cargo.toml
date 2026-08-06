@@ -1,0 +1,76 @@
+[workspace]
+exclude = ["cpp", "fuzz", "crates/sonora-sys", "crates/sonora-bench"]
+members = [
+  "crates/sonora",
+  "crates/sonora-ffi",
+  "crates/sonora-common-audio",
+  "crates/sonora-aec3",
+  "crates/sonora-agc2",
+  "crates/sonora-ns",
+  "crates/sonora-simd",
+  "crates/sonora-fft",
+]
+resolver = "3"
+
+  [workspace.package]
+  edition      = "2024"
+  license      = "BSD-3-Clause"
+  repository   = "https://github.com/dignifiedquire/sonora"
+  rust-version = "1.91"
+
+  [workspace.dependencies]
+  # Internal crates
+  sonora              = { version = "0.1.0", path = "crates/sonora" }
+  sonora-aec3         = { version = "0.1.0", path = "crates/sonora-aec3" }
+  sonora-agc2         = { version = "0.1.0", path = "crates/sonora-agc2" }
+  sonora-common-audio = { version = "0.1.0", path = "crates/sonora-common-audio" }
+  sonora-ffi          = { version = "0.1.0", path = "crates/sonora-ffi" }
+  sonora-fft          = { version = "0.1.0", path = "crates/sonora-fft" }
+  sonora-ns           = { version = "0.1.0", path = "crates/sonora-ns" }
+  sonora-simd         = { version = "0.1.0", path = "crates/sonora-simd" }
+
+  # External dependencies
+  anyhow             = "1"
+  bytemuck           = { version = "1", features = ["derive"] }
+  clap               = { version = "4", features = ["derive"] }
+  cpal               = "0.17"
+  cpufeatures        = "0.3"
+  criterion          = { version = "0.8", features = ["html_reports"] }
+  ctrlc              = { version = "3", features = ["termination"] }
+  derive_more        = { version = "2", features = ["debug"] }
+  hound              = "3"
+  proptest           = "1.11"
+  ringbuf            = "0.5"
+  test-strategy      = "0.4"
+  tracing            = "0.1"
+  tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+  [workspace.lints.rust]
+  elided_lifetimes_in_paths     = "warn"
+  missing_debug_implementations = "warn"
+  unexpected_cfgs               = { level = "deny", check-cfg = ["cfg(docsrs)"] }
+  unnameable_types              = "warn"
+  unreachable_pub               = "warn"
+
+  [workspace.lints.clippy]
+  absolute_paths                  = "warn"
+  allow_attributes_without_reason = "warn"
+  manual_let_else                 = "warn"
+  mod_module_files                = "deny"
+  or_fun_call                     = "warn"
+  unused_async                    = "warn"
+  use_self                        = "warn"
+  # DSP: exact C++ float constants for bit-exact output
+  excessive_precision = "allow"
+  # DSP: exact C++ table values near known constants (e.g. PI)
+  approx_constant = "allow"
+
+# Match C++ optimization level: -O3, LTO, single codegen unit
+[profile.release]
+codegen-units = 1
+lto           = "thin"
+
+[profile.bench]
+codegen-units = 1
+debug         = true
+lto           = "thin"

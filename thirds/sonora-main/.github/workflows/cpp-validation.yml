@@ -1,0 +1,106 @@
+name: C++ Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 6 * * 1' # Weekly on Monday
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Run the C++ test suite with the Rust backend replacing the C++ pipeline.
+  validate:
+    name: C++ Test Suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: davidB/rust-cargo-make@v1
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: cargo make cpp-deps
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install meson ninja abseil protobuf pkg-config || true
+
+      - name: Run C++ test suite with Rust backend (Linux)
+        if: runner.os == 'Linux'
+        run: cargo make cpp-validate
+        timeout-minutes: 15
+
+      - name: Run C++ test suite with Rust backend (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        run: |
+          # Run meson directly — cargo-make's shell environment causes
+          # a spurious compile failure on macOS ARM (identical compile
+          # commands succeed when run outside cargo-make).
+          cargo build --release -p sonora-ffi
+          cd cpp
+          rm -rf builddir
+          meson setup builddir -Dtests=enabled -Drust-backend=true \
+            -Dprefix="$(pwd)/install" --libdir=lib \
+            -Dc_args=-march=native -Dcpp_args=-march=native
+          ninja -C builddir
+          meson test -C builddir -v --print-errorlogs --timeout-multiplier 3 \
+            --test-args="--gtest_filter=-RnnVadTest.LpResidualPipelineBitExactness"
+
+  # Run the Rust vs C++ comparison tests (sonora-bench).
+  compare:
+    name: Rust/C++ Comparison (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: davidB/rust-cargo-make@v1
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: cargo make cpp-deps
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install meson ninja abseil protobuf pkg-config || true
+
+      - name: Run Rust vs C++ comparison tests (Linux)
+        if: runner.os == 'Linux'
+        run: cargo make cpp-test
+
+      - name: Run Rust vs C++ comparison tests (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        run: |
+          # Build C++ reference library directly (same as cargo make cpp-build)
+          cd cpp
+          rm -rf builddir
+          meson setup builddir --buildtype=release -Dtests=disabled \
+            -Dprefix="$(pwd)/install" --libdir=lib \
+            -Dc_args=-march=native -Dcpp_args=-march=native
+          ninja -C builddir install
+          cd ..
+          # Run Rust vs C++ comparison tests
+          PKG_CONFIG_PATH="$(pwd)/cpp/install/lib/pkgconfig" \
+          LD_LIBRARY_PATH="$(pwd)/cpp/install/lib" \
+            cargo test --manifest-path crates/sonora-bench/Cargo.toml

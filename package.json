@@ -1,7 +1,7 @@
 {
   "name": "@aiui/perception-audio-recorder",
-  "version": "1.0.0",
-  "description": "Template project for writing node package with napi-rs",
+  "version": "1.0.6",
+  "description": "麦克风扬声器音频采集插件，支持仅录制 mic 时通过内部 loopback render reference 进行回声消除",
   "main": "index.js",
   "repository": {
     "type": "git",
@@ -81,6 +81,9 @@
     "prettier": "^3.6.2",
     "tinybench": "^6.0.0",
     "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "ws": "^8.20.0"
   },
   "lint-staged": {
     "*.@(js|ts|tsx)": [

@@ -1,0 +1,17 @@
+[package]
+categories             = ["multimedia::audio"]
+description            = "Noise Suppression for WebRTC Audio Processing"
+edition.workspace      = true
+keywords               = ["webrtc", "audio", "noise-suppression", "denoising"]
+license.workspace      = true
+name                   = "sonora-ns"
+readme                 = "README.md"
+repository.workspace   = true
+rust-version.workspace = true
+version                = "0.1.0"
+
+[lints]
+workspace = true
+
+[dependencies]
+sonora-fft = { workspace = true }

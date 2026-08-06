@@ -1,0 +1,29 @@
+[package]
+edition = "2024"
+name    = "sonora-fuzz"
+publish = false
+version = "0.0.0"
+
+  [package.metadata]
+  cargo-fuzz = true
+
+[dependencies]
+arbitrary     = { version = "1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+sonora        = { path = "../crates/sonora" }
+sonora-ffi    = { path = "../crates/sonora-ffi" }
+
+[[bin]]
+doc  = false
+name = "process_stream"
+path = "fuzz_targets/process_stream.rs"
+
+[[bin]]
+doc  = false
+name = "config_changes"
+path = "fuzz_targets/config_changes.rs"
+
+[[bin]]
+doc  = false
+name = "c_api"
+path = "fuzz_targets/c_api.rs"
